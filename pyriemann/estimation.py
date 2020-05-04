@@ -1,12 +1,17 @@
 """Estimation of covariance matrices."""
-import numpy
+import functools
 
-from .spatialfilters import Xdawn
-from .utils.covariance import (covariances, covariances_EP, cospectrum,
-                               coherence)
+import numpy
+import numpy as np
+from scipy.signal import filtfilt
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.covariance import shrunk_covariance
 
+from pyriemann.utils.covariance import covariances
+from .spatialfilters import Xdawn
+from .utils.covariance import (covariances_EP, cospectrum,
+                               coherence)
+from .utils.filters import design_filter
 
 def _nextpow2(i):
     """Find next power of 2."""
@@ -590,3 +595,74 @@ class Shrinkage(BaseEstimator, TransformerMixin):
             covmats[ii] = shrunk_covariance(x, self.shrinkage)
 
         return covmats
+
+
+class SSVEPCovariance(BaseEstimator, TransformerMixin):
+    """Estimate special form covariance matrix for SSVEP.
+
+    Perform a simple covariance matrix estimation for each given trial.
+
+    Parameters
+    ----------
+    estimator : string (default: 'scm')
+        covariance matrix estimator. For regularization consider 'lwf' or 'oas'
+        For a complete list of estimator, see `utils.covariance`.
+
+    """
+
+    def __init__(self, rate: float = 256, flickering_frequencies: tuple = (13, 17, 21),
+                 estimator: str = 'scm', **kwargs):
+        """Init."""
+        self._estimator = estimator
+        self._design_filters(rate, flickering_frequencies, **kwargs)
+
+    def fit(self, X: np.array, y: np.array = None) -> object:
+        """Fit.
+
+        Do nothing. For compatibility purpose.
+
+        Parameters
+        ----------
+        X : ndarray, shape (n_trials, n_channels, n_samples)
+            ndarray of trials.
+        y : ndarray shape (n_trials,)
+            labels corresponding to each trial, not used.
+
+        Returns
+        -------
+        self : SSVEPCovariance instance
+            The SSVEPCovariance instance.
+        """
+        return self
+
+    def transform(self, X: np.array) -> np.array:
+        """Estimate covariance matrices.
+
+        Parameters
+        ----------
+        X : ndarray, shape (n_trials, n_channels, n_samples)
+            ndarray of trials.
+
+        Returns
+        -------
+        covmats : ndarray, shape (n_trials, n_channels * n_frequencies, n_channels * n_frequencies)
+            SSVEP covariance matrices for each trials.
+        """
+        filtered = []
+        for filter in self.filters:
+            filtered_X = filter(X, axis=-1)
+            filtered.append(filtered_X)
+        mega_X = np.concatenate(filtered, axis=1)
+        out = covariances(mega_X, estimator=self._estimator)
+        return out
+
+    def _design_filters(self, fs: float, flickering_frequencies: tuple,
+                        bandwidth: float = 4, order: int = 2,
+                        filter_design: str = 'iir', padlen: int = None):
+        self.filters = []
+        for flickering_frequency in flickering_frequencies:
+            frequencies = [flickering_frequency - bandwidth / 2,
+                           flickering_frequency + bandwidth / 2]  # TODO/Question : shall we consider harmonics as well ?
+            filter_args = design_filter(frequencies=frequencies, order=order, fs=fs, filter_design=filter_design)
+            filter_func = functools.partial(filtfilt, *filter_args, padlen=padlen)
+            self.filters.append(filter_func)
