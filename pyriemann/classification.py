@@ -15,7 +15,6 @@ from .tangentspace import FGDA, TangentSpace
 
 
 class MDM(BaseEstimator, ClassifierMixin, TransformerMixin):
-
     """Classification by Minimum Distance to Mean.
 
     Classification by nearest centroid. For each of the given classes, a
@@ -512,3 +511,103 @@ class KNearestNeighbor(MDM):
         neighbors_classes = self.classes_[numpy.argsort(dist)]
         out, _ = stats.mode(neighbors_classes[:, 0:self.n_neighbors], axis=1)
         return out.ravel()
+
+
+import numpy as np
+from pyriemann.clustering import Potato
+from copy import deepcopy
+
+
+class MDMWithPotato(MDM):
+    """Classification by Minimum Distance to Mean combined with an artifact rejection using a Potato
+    """
+
+    def __init__(self, metric='riemann', n_jobs=1, threshold=3, n_iter_max=100,
+                 rejected_label=-1):
+        """Init."""
+        # store params for cloning purpose
+        super().__init__(metric=metric, n_jobs=n_jobs)
+        self.potato = Potato(metric=metric, threshold=threshold,
+                             n_iter_max=n_iter_max,
+                             neg_label=0,
+                             pos_label=1)
+        self.rejected_label = rejected_label
+
+    def fit(self, X, y, sample_weight=None):
+        """Fit (estimates) the centroids and the potato
+
+        Parameters
+        ----------
+        X : ndarray, shape (n_trials, n_channels, n_channels)
+            ndarray of SPD matrices.
+        y : ndarray shape (n_trials, 1)
+            labels corresponding to each trial.
+        sample_weight : None | ndarray shape (n_trials, 1)
+            the weights of each sample. if None, each sample is treated with
+            equal weights.
+
+        Returns
+        -------
+        self : MDM instance
+            The MDM instance.
+        """
+        self.potato.fit(deepcopy(X))
+        super().fit(X, y, sample_weight)
+        return self
+
+    def predict(self, X):
+        """get the predictions.
+
+        Parameters
+        ----------
+        X : ndarray, shape (n_trials, n_channels, n_channels)
+            ndarray of SPD matrices.
+
+        Returns
+        -------
+        pred : ndarray of int, shape (n_trials, 1)
+            the prediction for each trials according to the closest centroid.
+        """
+        mdm_predict = super().predict(X)
+        potato_predict = self.potato.predict(X)
+        mdm_predict[potato_predict == 0] = self.rejected_label
+        return mdm_predict
+
+    def transform(self, X):
+        """get the distance to each centroid.
+
+        Parameters
+        ----------
+        X : ndarray, shape (n_trials, n_channels, n_channels)
+            ndarray of SPD matrices.
+
+        Returns
+        -------
+        dist : ndarray, shape (n_trials, n_classes)
+            the distance to each centroid according to the metric.
+        """
+        return super().transform(X)
+
+    def fit_predict(self, X, y):
+        """Fit and predict in one function."""
+        super().fit(X, y)
+        self.potato.fit(X)
+        return self.predict(X)
+
+    def predict_proba(self, X):
+        """Predict proba using softmax and set to NaN the rejected trials
+
+        Parameters
+        ----------
+        X : ndarray, shape (n_trials, n_channels, n_channels)
+            ndarray of SPD matrices.
+
+        Returns
+        -------
+        prob : ndarray, shape (n_trials, n_classes)
+            the softmax probabilities for each class.
+        """
+        mdm_proba = softmax(-super()._predict_distances(X))
+        potato_predict = self.potato.predict(X)
+        mdm_proba[potato_predict == 0] = np.NaN
+        return mdm_proba
